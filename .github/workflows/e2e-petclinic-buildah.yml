@@ -1,0 +1,106 @@
+name: E2E OpenShift Pet Clinic Buildah Workflow
+on: [ push, workflow_dispatch ]
+
+jobs:
+  compile-petclinic:
+    name: Compile Pet Clinic
+    runs-on: ubuntu-18.04
+    outputs:
+      jarname: ${{ steps.get-jarname.outputs.jarname }}
+    env:
+      TARGET_DIR: target/
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        ref: main
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Hash source files
+      # Hash all files other than those we expicitly ignore here, which would have no effect on the output jar.
+      run: |
+        echo "SRC_HASH=${{ hashFiles('**', '!.git/**', '!readme.md', '!docker-compose.yml', '!.gitignore', '!.vscode/**', '!.github/**') }}" >> $GITHUB_ENV
+
+    - name: Look for existing cache
+      uses: actions/cache@v2
+      id: check-target-cached
+      with:
+        path: ${{ env.TARGET_DIR }}
+        key: ${{ env.SRC_HASH }}
+
+    - name: Setup Java
+      uses: actions/setup-java@v1
+      with:
+        java-version: 11
+      if: steps.check-target-cached.outputs.cache-hit != 'true'
+
+    - run: java -version
+      if: steps.check-target-cached.outputs.cache-hit != 'true'
+
+    - run: mvn -ntp -B package
+      if: steps.check-target-cached.outputs.cache-hit != 'true'
+
+    # If there was no cache hit above, store the output into the cache now.
+    - name: Update cache
+      uses: actions/cache@v2
+      if: steps.check-target-cached.outputs.cache-hit != 'true'
+      with:
+        path: ${{ env.TARGET_DIR }}
+        key: ${{ env.SRC_HASH }}
+
+    # At this point, the target jar is present. Either from the cache, or was just built.
+
+    # Store the output jar into the env for reuse below.
+    # It will contain, eg. "spring-petclinic-2.3.0.BUILD-SNAPSHOT.jar"
+    - name: Get jar filename
+      id: get-jarname
+      run: |
+        export JAR_NAME="$(basename $(ls target/*.jar))"
+        echo "Petclinic jar is $JAR_NAME"
+        echo "::set-output name=jarname::$JAR_NAME"
+        echo "JAR_NAME=$JAR_NAME" >> $GITHUB_ENV
+
+    - uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.JAR_NAME }}
+        path: ${{ env.TARGET_DIR }}/${{ env.JAR_NAME }}
+        if-no-files-found: error
+
+  build-push-image:
+    name: Build and Push Pet Clinic to Quay
+    runs-on: ubuntu-18.04
+    needs: compile-petclinic
+    env:
+      IMAGE_NAME: petclinic
+      IMAGE_TAG: latest
+      QUAY_USER: tetchell
+      JAR_NAME: ${{ needs.compile-petclinic.outputs.jarname }}
+    steps:
+      - name: print needs
+        run: echo "${{ toJson(needs) }}"
+      - name: print env
+        run: echo "${{ toJson(env) }}"
+
+      - uses: actions/download-artifact@v2
+        with:
+          name: ${{ env.JAR_NAME }}
+
+      - name: Build Image
+        uses: redhat-actions/buildah-action@main
+        with:
+          new-image-name: ${{ env.IMAGE_NAME }}
+          base-image: docker.io/fabric8/java-alpine-openjdk11-jre
+          content: ${{ env.JAR_NAME }}
+          entrypoint: |
+            java
+            -jar
+            ${{ env.JAR_NAME }}
+          port: 8080
+
+      - name: Push to Quay
+        uses: redhat-actions/push-to-registry@v1
+        with:
+          image: ${{ env.IMAGE_NAME }}
+          tag: ${{ env.IMAGE_TAG }}
+          registry: "quay.io/${{ env.QUAY_USER }}"
+          username: ${{ env.QUAY_USER }}
+          password: ${{ secrets.QUAY_PASSWORD }}
