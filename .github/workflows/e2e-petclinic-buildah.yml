@@ -1,24 +1,27 @@
 name: E2E OpenShift Pet Clinic Buildah Workflow
 on: [ push, workflow_dispatch ]
+env:
+  QUAY_USER: tetchell
+  IMAGE_NAME: petclinic
+  IMAGE_TAG: latest
+  CONTAINER_PORT: 8080
 
 jobs:
-  compile-petclinic:
-    name: Compile Pet Clinic
-    runs-on: ubuntu-18.04
+  ####################################################################################################
+  compile:
+    name: Compile
+    runs-on: ubuntu-20.04
     outputs:
       jarname: ${{ steps.get-jarname.outputs.jarname }}
     env:
       TARGET_DIR: target/
     steps:
     - uses: actions/checkout@v2
-      with:
-        ref: main
-        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Hash source files
       # Hash all files other than those we expicitly ignore here, which would have no effect on the output jar.
       run: |
-        echo "SRC_HASH=${{ hashFiles('**', '!.git/**', '!readme.md', '!docker-compose.yml', '!.gitignore', '!.vscode/**', '!.github/**') }}" >> $GITHUB_ENV
+        echo "SRC_HASH=${{ hashFiles('**', '!.git/**', '!readme.md', '!docker-compose.yml', '!.gitignore', '!.vscode/**', '!.github/**', '!manifests/**') }}" >> $GITHUB_ENV
 
     - name: Look for existing cache
       uses: actions/cache@v2
@@ -27,6 +30,7 @@ jobs:
         path: ${{ env.TARGET_DIR }}
         key: ${{ env.SRC_HASH }}
 
+    # If the cache lookup failed, we have to build the jar.
     - name: Setup Java
       uses: actions/setup-java@v1
       with:
@@ -47,7 +51,7 @@ jobs:
         path: ${{ env.TARGET_DIR }}
         key: ${{ env.SRC_HASH }}
 
-    # At this point, the target jar is present. Either from the cache, or was just built.
+    # The jar has now been either built, or retrieved from teh cache.
 
     # Store the output jar into the env for reuse below.
     # It will contain, eg. "spring-petclinic-2.3.0.BUILD-SNAPSHOT.jar"
@@ -65,21 +69,14 @@ jobs:
         path: ${{ env.TARGET_DIR }}/${{ env.JAR_NAME }}
         if-no-files-found: error
 
+  ####################################################################################################
   build-push-image:
-    name: Build and Push Pet Clinic to Quay
-    runs-on: ubuntu-18.04
-    needs: compile-petclinic
+    name: Build and Push to Quay
+    runs-on: ubuntu-20.04
+    needs: compile
     env:
-      IMAGE_NAME: petclinic
-      IMAGE_TAG: latest
-      QUAY_USER: tetchell
-      JAR_NAME: ${{ needs.compile-petclinic.outputs.jarname }}
+      JAR_NAME: ${{ needs.compile.outputs.jarname }}
     steps:
-      - name: print needs
-        run: echo "${{ toJson(needs) }}"
-      - name: print env
-        run: echo "${{ toJson(env) }}"
-
       - uses: actions/download-artifact@v2
         with:
           name: ${{ env.JAR_NAME }}
@@ -94,13 +91,65 @@ jobs:
             java
             -jar
             ${{ env.JAR_NAME }}
-          port: 8080
+          port: ${{ env.CONTAINER_PORT }}
 
       - name: Push to Quay
         uses: redhat-actions/push-to-registry@v1
         with:
           image: ${{ env.IMAGE_NAME }}
           tag: ${{ env.IMAGE_TAG }}
-          registry: "quay.io/${{ env.QUAY_USER }}"
+          registry: quay.io/${{ env.QUAY_USER }}
           username: ${{ env.QUAY_USER }}
           password: ${{ secrets.QUAY_PASSWORD }}
+
+  ####################################################################################################
+  openshift-deploy:
+    name: Deploy on OpenShift
+    runs-on: ubuntu-20.04
+    needs: build-push-image
+    env:
+      TEST_NAMESPACE: tetchell-code
+      # TODO - The registry, image name, and tag are all hard-coded into the manifest.
+      # The manifest should be a template instead.
+      TEST_MANIFEST: manifests/petclinic.yml
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: OpenShift Login
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.SANDBOX_URL }}
+          openshift_token: ${{ secrets.SANDBOX_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.TEST_NAMESPACE }}
+
+      - name: Apply manifest
+        id: apply-manifest
+        run: |
+          oc apply -f ${{ env.TEST_MANIFEST }}
+
+      - name: View deployed resources
+        run: oc get -f ${{ env.TEST_MANIFEST }}
+
+      - name: Get public route
+        run: |
+          export PROTOCOL=http
+          export PROJECT_ROUTE=${PROTOCOL}://$(oc get route petclinic -o jsonpath='{.spec.host}')
+          echo "Project route is $PROJECT_ROUTE"
+          echo "PROJECT_ROUTE=$PROJECT_ROUTE" >> $GITHUB_ENV
+
+      - name: Pause to allow pod to come up
+        run: sleep 10
+
+      - name: Test project is running
+        uses: nick-invision/retry@v2
+        with:
+          timeout_seconds: 10
+          retry_wait_seconds: 10
+          max_attempts: 6
+          command: curl -sSfLi ${{ env.PROJECT_ROUTE }}
+
+      - name: Clean up deployed resources
+        if: ${{ always() }} && ${{ steps.apply-manifest.result }} == 'success'
+        run: oc delete -f ${{ env.TEST_MANIFEST }}
