@@ -1,8 +1,0 @@
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: petclinic
-spec:
-  to:
-    kind: Service
-    name: petclinic-svc

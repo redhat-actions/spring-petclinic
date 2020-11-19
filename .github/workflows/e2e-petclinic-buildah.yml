@@ -3,8 +3,9 @@ on: [ push, workflow_dispatch ]
 env:
   IMAGE_REGISTRY: quay.io
   QUAY_USER: tetchell
-  IMAGE_NAME: petclinic
+  APP_BASENAME: petclinic
   APP_PORT: 8080
+  TEST_NAMESPACE: tetchell-code
 
 jobs:
   ####################################################################################################
@@ -75,8 +76,8 @@ jobs:
     runs-on: ubuntu-20.04
     needs: compile
     outputs:
-      image_url: ${{ steps.resolve_image_url.outputs.image_url }}
-      image_tag: ${{ steps.set_tag.outputs.image_tag }}
+      image-tag: ${{ steps.set-tag.outputs.image-tag }}
+      image-url: ${{ steps.push-to-quay.outputs.image-url }}
     env:
       JAR_NAME: ${{ needs.compile.outputs.jarname }}
       IMAGE_TAG: latest
@@ -85,26 +86,18 @@ jobs:
         with:
           name: ${{ env.JAR_NAME }}
 
-      - name: Set image tag
-        id: set_tag
+      - name: Set tag
+        id: set-tag
         run: |
-          export IMAGE_TAG=latest
-          export REF="${{ github.ref }}"
-          if [[ $REF =~ "refs/tags/" ]]; then
-            echo "Tag workflow detected"
-            # it is a tag, so we set the image tag to the git tag
-            export IMAGE_TAG=${REF/refs\/tags\/}
-          else
-            echo "Not a tag workflow"
-          fi
-          echo "Tag is $IMAGE_TAG"
+          export IMAGE_TAG="${GITHUB_SHA::7}"
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-          echo "::set-output name=image_tag::$IMAGE_TAG"
+          echo "::set-output name=image-tag::$IMAGE_TAG"
 
       - name: Build Image
-        uses: redhat-actions/buildah-action@main
+        uses: redhat-actions/buildah-action@v1
         with:
-          new-image-name: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          image: ${{ env.APP_BASENAME }}
+          tag: ${{ env.IMAGE_TAG }}
           base-image: docker.io/fabric8/java-alpine-openjdk11-jre
           content: ${{ env.JAR_NAME }}
           entrypoint: |
@@ -114,18 +107,14 @@ jobs:
           port: ${{ env.CONTAINER_PORT }}
 
       - name: Push to Quay
+        id: push-to-quay
         uses: redhat-actions/push-to-registry@v1
         with:
-          image: ${{ env.IMAGE_NAME }}
+          image: ${{ env.APP_BASENAME }}
           tag: ${{ env.IMAGE_TAG }}
           registry: ${{ env.IMAGE_REGISTRY }}/${{ env.QUAY_USER }}
           username: ${{ env.QUAY_USER }}
           password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Resolve image URL
-        id: resolve_image_url
-        run: |
-          echo "::set-output name=image_url::${{ env.IMAGE_REGISTRY }}/${{ env.QUAY_USER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
 
   ####################################################################################################
   openshift-deploy:
@@ -136,22 +125,18 @@ jobs:
       run:
         working-directory: manifests
     env:
-      TEST_NAMESPACE: tetchell-code
       BUILT_MANIFEST: petclinic.yml
-      IMAGE_URL: ${{ needs.build-push-image.outputs.image_url }}
-      VERSION: ${{ needs.build-push-image.outputs.image_tag }}
+      IMAGE_URL: ${{ needs.build-push-image.outputs.image-url }}
+      TAG: ${{ needs.build-push-image.outputs.image-tag }}
 
     steps:
       - uses: actions/checkout@v2
 
-      - name: Generate kustomize patch
+      - name: Generate manifest
         run: |
-          echo "::group::Generated patch file"
-          envsubst < patch.template.yml | tee patch.yml
-          echo "::endgroup::"
-          echo "::group::Generated manifest"
-          kustomize build . | tee ${{ env.BUILT_MANIFEST }}
-          echo "::endgroup::"
+          export APP_NAME=${APP_BASENAME}-${TAG}
+          echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
+          ./generate-manifest.sh
 
       - name: Upload manifest
         uses: actions/upload-artifact@v2
@@ -160,24 +145,24 @@ jobs:
           path: manifests/${{ env.BUILT_MANIFEST }}
           if-no-files-found: error
 
-      - name: OpenShift Login
+      - name: OpenShift login
         uses: redhat-actions/oc-login@v1
         with:
-          openshift_server_url: ${{ secrets.SANDBOX_URL }}
-          openshift_token: ${{ secrets.SANDBOX_TOKEN }}
+          openshift_server_url: ${{ secrets.OPENSHIFT_URL }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
           insecure_skip_tls_verify: true
           namespace: ${{ env.TEST_NAMESPACE }}
 
       - name: Apply manifest
         id: apply-manifest
-        run: oc apply -f ${{ env.BUILT_MANIFEST }}
+        run: oc create -f ${{ env.BUILT_MANIFEST }}
 
       - name: View deployed resources
         run: oc get -f ${{ env.BUILT_MANIFEST }}
 
       - name: Get public route
         run: |
-          export HOST=$(oc get route petclinic -o jsonpath='{.spec.host}')
+          export HOST=$(oc get route $APP_NAME -o jsonpath='{.spec.host}')
           [[ -n $HOST ]]   # Check non-empty
           export PROJECT_ROUTE=http://$HOST
           echo "Project route is $PROJECT_ROUTE"
@@ -187,14 +172,20 @@ jobs:
         run: sleep 10
 
       - name: Test project is running
+        id: test-project
         uses: nick-invision/retry@v2.2.0
         with:
           timeout_seconds: 5
-          retry_wait_seconds: 10
-          max_attempts: 6
+          retry_wait_seconds: 15
+          max_attempts: 10
           warning_on_retry: false
           command: curl -sSfLi ${{ env.PROJECT_ROUTE }}
 
+      - name: Debug failed test
+        if: ${{ steps.test-project.outcome }} == "failure"
+        run: |
+          oc describe -f ${{ env.BUILT_MANIFEST }}
+
       - name: Clean up deployed resources
-        if: always() && ${{ steps.apply-manifest.outcome }} == 'success'
+        if: always()
         run: oc delete -f ${{ env.BUILT_MANIFEST }}
