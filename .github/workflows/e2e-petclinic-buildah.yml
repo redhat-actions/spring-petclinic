@@ -19,40 +19,31 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    - name: Hash source files
-      # Hash all files other than those we expicitly ignore here, which would have no effect on the output jar.
+    - name: Hash Maven files
       run: |
-        echo "SRC_HASH=${{ hashFiles('**', '!.git/**', '!readme.md', '!docker-compose.yml', '!.gitignore', '!.vscode/**', '!.github/**', '!manifests/**') }}" >> $GITHUB_ENV
+        echo "MVN_HASH=${{ hashFiles('pom.xml', '.mvn/**/*', 'mvnw*') }}" >> $GITHUB_ENV
 
     - name: Look for existing cache
       uses: actions/cache@v2
-      id: check-target-cached
       with:
-        path: ${{ env.TARGET_DIR }}
-        key: ${{ env.SRC_HASH }}
+        path: ~/.m2/repository
+        key: ${{ env.MVN_HASH }}
 
-    # If the cache lookup failed, we have to build the jar.
     - name: Setup Java
       uses: actions/setup-java@v1
       with:
         java-version: 11
-      if: steps.check-target-cached.outputs.cache-hit != 'true'
 
     - run: java -version
-      if: steps.check-target-cached.outputs.cache-hit != 'true'
 
     - run: mvn -ntp -B package
-      if: steps.check-target-cached.outputs.cache-hit != 'true'
 
     # If there was no cache hit above, store the output into the cache now.
     - name: Update cache
       uses: actions/cache@v2
-      if: steps.check-target-cached.outputs.cache-hit != 'true'
       with:
-        path: ${{ env.TARGET_DIR }}
-        key: ${{ env.SRC_HASH }}
-
-    # The jar has now been either built, or retrieved from teh cache.
+        path: ~/.m2/repository
+        key: ${{ env.MVN_HASH }}
 
     # Store the output jar into the env for reuse below.
     # It will contain, eg. "spring-petclinic-2.3.0.BUILD-SNAPSHOT.jar"
