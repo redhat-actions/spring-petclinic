@@ -37,4 +37,4 @@ It demos an end-to-end workflow which:
             - `oc whoami --show-server` for the `OPENSHIFT_SERVER`.
             - `oc whoami --show-token` for the `OPENSHIFT_TOKEN`.
 5. Commit your changes and push to your fork.
-6. The workflow should run, create the petclinic, and delete it. Comment out the 'Clean up' step if you want it to stay deployed.
+6. The workflow should run, create the petclinic, and delete it. Set env.TEAR_DOWN to something other than 'true' if you want the app to stay running.

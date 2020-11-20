@@ -6,6 +6,7 @@ env:
   TEST_NAMESPACE: tetchell-code
   APP_BASENAME: petclinic
   APP_PORT: 8080
+  TEAR_DOWN: true
 
 jobs:
   #####################################################################################################################
@@ -206,5 +207,5 @@ jobs:
 
       # Clean up the resources we deployed, even if there was an error above.
       - name: Clean up deployed resources
-        if: always() && steps.apply-manifest.outcome != 'skipped'
+        if: always() && env.TEAR_DOWN == 'true' && steps.apply-manifest.outcome != 'skipped'
         run: oc delete -f ${{ env.BUILT_MANIFEST }}
