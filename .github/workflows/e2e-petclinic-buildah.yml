@@ -1,14 +1,14 @@
 name: E2E OpenShift Pet Clinic Buildah Workflow
 on: [ push, workflow_dispatch ]
 env:
+  REGISTRY_USER: tetchell
   IMAGE_REGISTRY: quay.io
-  QUAY_USER: tetchell
+  TEST_NAMESPACE: tetchell-code
   APP_BASENAME: petclinic
   APP_PORT: 8080
-  TEST_NAMESPACE: tetchell-code
 
 jobs:
-  ####################################################################################################
+  #####################################################################################################################
   ## The compile job compiles the application into a jar, and uploads it as an artifact for the next job to use.
   compile:
     name: Compile
@@ -68,8 +68,9 @@ jobs:
         path: ${{ env.TARGET_DIR }}/${{ env.JAR_NAME }}
         if-no-files-found: error
 
-  ####################################################################################################
-  ## The build and push image job builds the container image with the petclinic jar in it, and pushes it to an image registry.
+  #####################################################################################################################
+  ## The build and push image job builds the container image with the petclinic jar in it,
+  ## and pushes it to an image registry.
   ## It outputs the image tag and image URL for the next step to use when deploying to the OpenShift cluster.
   build-push-image:
     name: Build and Push to Quay
@@ -116,12 +117,13 @@ jobs:
         with:
           image: ${{ env.APP_BASENAME }}
           tag: ${{ env.IMAGE_TAG }}
-          registry: ${{ env.IMAGE_REGISTRY }}/${{ env.QUAY_USER }}
-          username: ${{ env.QUAY_USER }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          registry: ${{ env.IMAGE_REGISTRY }}/${{ env.REGISTRY_USER }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
 
-  ####################################################################################################
-  ## The OpenShift Deploy step deploys the image that was created above into our OpenShift cluster, using a k8s manifest written specifically for this workflow run.
+  #####################################################################################################################
+  ## The OpenShift Deploy step deploys the image that was created above into our OpenShift cluster,
+  ## using a k8s manifest written specifically for this workflow run.
   ## It can then run any integration tests before deleting the resources that were created.
   openshift-deploy:
     name: Deploy on OpenShift
@@ -161,6 +163,8 @@ jobs:
         with:
           openshift_server_url: ${{ secrets.OPENSHIFT_URL }}
           openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          # openshift_username:
+          # openshift_password:
           insecure_skip_tls_verify: true
           namespace: ${{ env.TEST_NAMESPACE }}
 
