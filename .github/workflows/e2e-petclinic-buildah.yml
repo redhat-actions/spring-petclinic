@@ -9,6 +9,7 @@ env:
 
 jobs:
   ####################################################################################################
+  ## The compile job compiles the application into a jar, and uploads it as an artifact for the next job to use.
   compile:
     name: Compile
     runs-on: ubuntu-20.04
@@ -16,17 +17,21 @@ jobs:
       jarname: ${{ steps.get-jarname.outputs.jarname }}
     env:
       TARGET_DIR: target/
+      MVN_REPO_DIR: ~/.m2/repository
     steps:
     - uses: actions/checkout@v2
 
+    # If none of these files has changed, we assume that the contents of .m2/repository can be fetched from the cache.
     - name: Hash Maven files
       run: |
         echo "MVN_HASH=${{ hashFiles('pom.xml', '.mvn/**/*', 'mvnw*') }}" >> $GITHUB_ENV
 
-    - name: Look for existing cache
+    # Download the m2 repository from the cache to speed up the build.
+    - name: Check for Maven cache
+      id: check-mvn-cache
       uses: actions/cache@v2
       with:
-        path: ~/.m2/repository
+        path: ${{ env.MVN_REPO_DIR }}
         key: ${{ env.MVN_HASH }}
 
     - name: Setup Java
@@ -39,10 +44,11 @@ jobs:
     - run: mvn -ntp -B package
 
     # If there was no cache hit above, store the output into the cache now.
-    - name: Update cache
+    - name: Save Maven repo into cache
+      if: ${{ steps.check-mvn-cache.outputs.cache-hit }} != 'true'
       uses: actions/cache@v2
       with:
-        path: ~/.m2/repository
+        path: ${{ env.MVN_REPO_DIR }}
         key: ${{ env.MVN_HASH }}
 
     # Store the output jar into the env for reuse below.
@@ -55,6 +61,7 @@ jobs:
         echo "::set-output name=jarname::$JAR_NAME"
         echo "JAR_NAME=$JAR_NAME" >> $GITHUB_ENV
 
+    # Upload the jar for future jobs to use.
     - uses: actions/upload-artifact@v2
       with:
         name: ${{ env.JAR_NAME }}
@@ -62,28 +69,33 @@ jobs:
         if-no-files-found: error
 
   ####################################################################################################
+  ## The build and push image job builds the container image with the petclinic jar in it, and pushes it to an image registry.
+  ## It outputs the image tag and image URL for the next step to use when deploying to the OpenShift cluster.
   build-push-image:
     name: Build and Push to Quay
     runs-on: ubuntu-20.04
     needs: compile
     outputs:
-      image-tag: ${{ steps.set-tag.outputs.image-tag }}
+      image-tag: ${{ steps.set-image-tag.outputs.image-tag }}
       image-url: ${{ steps.push-to-quay.outputs.image-url }}
     env:
       JAR_NAME: ${{ needs.compile.outputs.jarname }}
       IMAGE_TAG: latest
     steps:
+      # Download the jar artifact from the compile step
       - uses: actions/download-artifact@v2
         with:
           name: ${{ env.JAR_NAME }}
 
-      - name: Set tag
-        id: set-tag
+      # Use the commit short-sha as the tag for this version of the image.
+      - name: Set Image tag
+        id: set-image-tag
         run: |
           export IMAGE_TAG="${GITHUB_SHA::7}"
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
           echo "::set-output name=image-tag::$IMAGE_TAG"
 
+      # Use buildah to build the application image with the jar inside.
       - name: Build Image
         uses: redhat-actions/buildah-action@v1
         with:
@@ -97,6 +109,7 @@ jobs:
             ${{ env.JAR_NAME }}
           port: ${{ env.CONTAINER_PORT }}
 
+      # Push the built image to our image registry so it can be pulled into the OpenShift cluster.
       - name: Push to Quay
         id: push-to-quay
         uses: redhat-actions/push-to-registry@v1
@@ -108,6 +121,8 @@ jobs:
           password: ${{ secrets.QUAY_PASSWORD }}
 
   ####################################################################################################
+  ## The OpenShift Deploy step deploys the image that was created above into our OpenShift cluster, using a k8s manifest written specifically for this workflow run.
+  ## It can then run any integration tests before deleting the resources that were created.
   openshift-deploy:
     name: Deploy on OpenShift
     runs-on: ubuntu-20.04
@@ -123,12 +138,16 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
+      # This step substitutes a number of environment variables into the k8s manifest
+      # to make the manifests sharable between workflows, and even between different apps.
+      # See manifests/generate-manifest.sh to see what variables must be set.
       - name: Generate manifest
         run: |
           export APP_NAME=${APP_BASENAME}-${TAG}
           echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
           ./generate-manifest.sh
 
+      # Upload the generated manifest. This is a useful debugging tool.
       - name: Upload manifest
         uses: actions/upload-artifact@v2
         with:
@@ -136,6 +155,7 @@ jobs:
           path: manifests/${{ env.BUILT_MANIFEST }}
           if-no-files-found: error
 
+      # Log into the OpenShift cluster using the secrets configured in the repository settings.
       - name: OpenShift login
         uses: redhat-actions/oc-login@v1
         with:
@@ -144,6 +164,7 @@ jobs:
           insecure_skip_tls_verify: true
           namespace: ${{ env.TEST_NAMESPACE }}
 
+      # Apply the manifest we generated above, deploying our app.
       - name: Apply manifest
         id: apply-manifest
         run: oc create -f ${{ env.BUILT_MANIFEST }}
@@ -151,6 +172,7 @@ jobs:
       - name: View deployed resources
         run: oc get -f ${{ env.BUILT_MANIFEST }}
 
+      # Determine the domain to which our app has been deployed; this allows us to issue requests to the app.
       - name: Get public route
         run: |
           export HOST=$(oc get route $APP_NAME -o jsonpath='{.spec.host}')
@@ -159,24 +181,26 @@ jobs:
           echo "Project route is $PROJECT_ROUTE"
           echo "PROJECT_ROUTE=$PROJECT_ROUTE" >> $GITHUB_ENV
 
-      - name: Pause to allow pod to come up
-        run: sleep 10
-
+      # Perform a (very) basic integration test.
+      # This step is retried since the time to pull the image and start the pod can vary.
       - name: Test project is running
         id: test-project
         uses: nick-invision/retry@v2.2.0
         with:
           timeout_seconds: 5
-          retry_wait_seconds: 15
-          max_attempts: 10
+          retry_wait_seconds: 5
+          max_attempts: 30
           warning_on_retry: false
+          # Just check that the root endpoint returns a success status (-f flag).
           command: curl -sSfLi ${{ env.PROJECT_ROUTE }}
 
+      # If the test above failed, describe all our resources so we can see what may be wrong.
       - name: Debug failed test
-        if: ${{ steps.test-project.outcome }} == "failure"
+        if: always() && steps.test-project.outcome == 'failure'
         run: |
           oc describe -f ${{ env.BUILT_MANIFEST }}
 
+      # Clean up the resources we deployed, even if there was an error above.
       - name: Clean up deployed resources
-        if: always()
+        if: always() && steps.apply-manifest.outcome != 'skipped'
         run: oc delete -f ${{ env.BUILT_MANIFEST }}
