@@ -1,0 +1,86 @@
+# The database resources are not version-tagged, because we only want to deploy one database at a time.
+
+{{- if not (lookup "apps/v1" "Deployment" .Release.Namespace .Values.dbResourceName) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.dbResourceName }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.dbResourceName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.dbResourceName }}
+    spec:
+      containers:
+      - name: {{ .Values.dbResourceName }}
+        image: mysql:5.7
+        resources:
+          limits:
+            memory: '256Mi'
+            cpu: '200m'
+        ports:
+        - containerPort: {{ .Values.dbPort }}
+          protocol: TCP
+        env:
+          - name: MYSQL_DATABASE
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.dbResourceName }}
+                key: mysql-database
+          - name: MYSQL_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.dbResourceName }}
+                key: mysql-user
+          - name: MYSQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.dbResourceName }}
+                key: {{ .Values.dbPasswordKey }}
+          - name: MYSQL_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.dbResourceName }}
+                key: mysql-root-password
+
+---
+
+{{ end }}
+
+{{- if not (lookup "v1" "Secret" .Release.Namespace .Values.dbResourceName) }}
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.dbResourceName }}
+data:
+  # For the demo app, the DB name, user, and password MUST be 'petclinic'.
+  {{- $encDBName := b64enc "petclinic" }}
+  mysql-database: {{ $encDBName }}
+  mysql-user: {{ $encDBName }}
+  mysql-password: {{ $encDBName }}
+  # Set the root password on the command-line.
+  mysql-root-password: {{ .Values.dbEncodedRootPassword }}
+
+---
+
+{{ end }}
+
+{{- if not (lookup "v1" "Service" .Release.Namespace .Values.dbResourceName) }}
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.dbResourceName }}
+spec:
+  selector:
+    app: {{ .Values.dbResourceName }}
+  ports:
+    - port: {{ .Values.dbPort }}
+      protocol: TCP
+  clusterIP: None
+
+{{ end }}

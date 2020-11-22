@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}
+  labels:
+    app: {{ .Values.appName }}
+    app.kubernetes.io/version: {{ .Values.tag }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}
+  replicas: {{ .Values.Replicas }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}
+    spec:
+      containers:
+        - name: {{ .Values.appName }}
+          image: {{ .Values.image }}
+          ports:
+            - containerPort: {{ .Values.appPort }}
+          imagePullPolicy: Always
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: mysql
+            - name: MYSQL_URL
+              # The db name MUST be 'petclinic'.
+              value: jdbc:mysql://{{ .Values.dbResourceName }}:{{ .Values.dbPort }}/petclinic
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbResourceName }}
+                  key: {{ .Values.dbPasswordKey }}
+          resources:
+              limits:
+                memory: '512Mi'
+                cpu: '250m'
+          readinessProbe:
+              httpGet:
+                path: /
+                port: {{ .Values.appPort }}
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.appName }}
+  labels:
+    app: {{ .Values.appName }}
+    app.kubernetes.io/version: {{ .Values.tag }}
+spec:
+  ports:
+    - port: {{ .Values.appPort }}
+      protocol: TCP
+  selector:
+    app: {{ .Values.appName }}
+
+---
+
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .Values.appName }}
+  labels:
+    app: {{ .Values.appName }}
+    app.kubernetes.io/version: {{ .Values.tag }}
+spec:
+  to:
+    kind: Service
+    name: {{ .Values.appName }}

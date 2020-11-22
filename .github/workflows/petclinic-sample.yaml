@@ -1,12 +1,12 @@
-name: E2E OpenShift Pet Clinic Buildah Workflow
+name: OpenShift Pet Clinic Workflow
 on: [ push, workflow_dispatch ]
 env:
   REGISTRY_USER: tetchell
   IMAGE_REGISTRY: quay.io
   TEST_NAMESPACE: tetchell-code
-  APP_BASENAME: petclinic
+  APP_NAME: petclinic
   APP_PORT: 8080
-  TEAR_DOWN: true
+  TEAR_DOWN: false
 
 jobs:
   #####################################################################################################################
@@ -101,7 +101,7 @@ jobs:
       - name: Build Image
         uses: redhat-actions/buildah-action@v1
         with:
-          image: ${{ env.APP_BASENAME }}
+          image: ${{ env.APP_NAME }}
           tag: ${{ env.IMAGE_TAG }}
           base-image: docker.io/fabric8/java-alpine-openjdk11-jre
           content: ${{ env.JAR_NAME }}
@@ -116,49 +116,31 @@ jobs:
         id: push-to-quay
         uses: redhat-actions/push-to-registry@v1
         with:
-          image: ${{ env.APP_BASENAME }}
+          image: ${{ env.APP_NAME }}
           tag: ${{ env.IMAGE_TAG }}
           registry: ${{ env.IMAGE_REGISTRY }}/${{ env.REGISTRY_USER }}
           username: ${{ env.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
   #####################################################################################################################
-  ## The OpenShift Deploy step deploys the image that was created above into our OpenShift cluster,
-  ## using a k8s manifest written specifically for this workflow run.
+  ## The OpenShift Deploy step deploys the image that was created above into our OpenShift cluster, using helm.
   ## It can then run any integration tests before deleting the resources that were created.
   openshift-deploy:
     name: Deploy on OpenShift
     runs-on: ubuntu-20.04
     needs: build-push-image
-    defaults:
-      run:
-        working-directory: manifests
     env:
-      BUILT_MANIFEST: petclinic.yml
+      CHART_DIR: petclinic/
+      BUILT_MANIFEST: petclinic-${{ needs.build-push-image.outputs.image-tag }}.yaml
       IMAGE_URL: ${{ needs.build-push-image.outputs.image-url }}
       TAG: ${{ needs.build-push-image.outputs.image-tag }}
 
     steps:
       - uses: actions/checkout@v2
 
-      # This step substitutes a number of environment variables into the k8s manifest
-      # to make the manifests sharable between workflows, and even between different apps.
-      # See manifests/generate-manifest.sh to see what variables must be set.
-      - name: Generate manifest
-        run: |
-          export APP_NAME=${APP_BASENAME}-${TAG}
-          echo "APP_NAME=${APP_NAME}" >> $GITHUB_ENV
-          ./generate-manifest.sh
-
-      # Upload the generated manifest. This is a useful debugging tool.
-      - name: Upload manifest
-        uses: actions/upload-artifact@v2
-        with:
-          name: ${{ env.BUILT_MANIFEST }}
-          path: manifests/${{ env.BUILT_MANIFEST }}
-          if-no-files-found: error
-
       # Log into the OpenShift cluster using the secrets configured in the repository settings.
+      # The GitHub Ubuntu runners have oc pre-installed.
+      # If you're not using those runners, be sure to check out https://github.com/redhat-actions/oc-installer.
       - name: OpenShift login
         uses: redhat-actions/oc-login@v1
         with:
@@ -169,10 +151,28 @@ jobs:
           insecure_skip_tls_verify: true
           namespace: ${{ env.TEST_NAMESPACE }}
 
-      # Apply the manifest we generated above, deploying our app.
-      - name: Apply manifest
-        id: apply-manifest
-        run: oc create -f ${{ env.BUILT_MANIFEST }}
+      # Deploy our sample application with helm.
+      # Only one database per namespace should be deployed at a time (see mysql.yaml)
+      # but the petclinic is redeployed for each commit.
+      # This also means it is possible to uninstall an older release, taking down the db and marooning a newer petclinic.
+      - name: Helm install
+        run: |
+          export HELM_RELEASE="petclinic-$TAG"
+          echo "HELM_RELEASE=$HELM_RELEASE" >> $GITHUB_ENV
+          set -x
+          helm install $HELM_RELEASE ${{ env.CHART_DIR }} \
+            --set-string appName="$HELM_RELEASE" \
+            --set-string tag="${{ env.TAG }}" \
+            --set image="${{ env.IMAGE_URL }}"
+          helm get manifest $HELM_RELEASE > ${{ env.BUILT_MANIFEST }}
+
+      # Upload the generated manifest. This is useful to have for cleanup, rewriting and debugging.
+      - name: Upload manifest
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ env.BUILT_MANIFEST }}
+          path: ${{ env.BUILT_MANIFEST }}
+          if-no-files-found: error
 
       - name: View deployed resources
         run: oc get -f ${{ env.BUILT_MANIFEST }}
@@ -180,7 +180,7 @@ jobs:
       # Determine the domain to which our app has been deployed; this allows us to issue requests to the app.
       - name: Get public route
         run: |
-          export HOST=$(oc get route $APP_NAME -o jsonpath='{.spec.host}')
+          export HOST=$(oc get route $HELM_RELEASE -o jsonpath='{.spec.host}')
           [[ -n $HOST ]]   # Check non-empty
           export PROJECT_ROUTE=http://$HOST
           echo "Project route is $PROJECT_ROUTE"
@@ -192,8 +192,8 @@ jobs:
         id: test-project
         uses: nick-invision/retry@v2.2.0
         with:
-          timeout_seconds: 5
-          retry_wait_seconds: 5
+          timeout_seconds: 3
+          retry_wait_seconds: 10
           max_attempts: 30
           warning_on_retry: false
           # Just check that the root endpoint returns a success status (-f flag).
@@ -204,8 +204,9 @@ jobs:
         if: always() && steps.test-project.outcome == 'failure'
         run: |
           oc describe -f ${{ env.BUILT_MANIFEST }}
+          oc describe po
 
       # Clean up the resources we deployed, even if there was an error above.
       - name: Clean up deployed resources
         if: always() && env.TEAR_DOWN == 'true' && steps.apply-manifest.outcome != 'skipped'
-        run: oc delete -f ${{ env.BUILT_MANIFEST }}
+        run: helm delete $HELM_RELEASE

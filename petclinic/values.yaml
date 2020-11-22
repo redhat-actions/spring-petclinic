@@ -1,0 +1,12 @@
+tag: latest
+appName: petclinic
+appPort: 8080
+image: quay.io/tetchell/petclinic
+replicas: 1
+
+# note, the name of the mysql db itself is just 'petclinic' - see the secret for details.
+dbResourceName: petclinic-db
+dbPort: 3306
+
+dbPasswordKey: mysql-password
+dbEncodedRootPassword: aW5zZWN1cmUtcm9vdC1wYXNzd29yZA==
