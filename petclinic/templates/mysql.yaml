@@ -1,6 +1,4 @@
-# The database resources are not version-tagged, because we only want to deploy one database at a time.
-
-{{- if not (lookup "apps/v1" "Deployment" .Release.Namespace .Values.dbResourceName) }}
+# {{- if not (lookup "apps/v1" "Deployment" .Release.Namespace .Values.dbResourceName) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,7 +18,7 @@ spec:
         resources:
           limits:
             memory: '256Mi'
-            cpu: '200m'
+            cpu: '125m'
         ports:
         - containerPort: {{ .Values.dbPort }}
           protocol: TCP
@@ -48,9 +46,9 @@ spec:
 
 ---
 
-{{ end }}
+# {{ end }}
 
-{{- if not (lookup "v1" "Secret" .Release.Namespace .Values.dbResourceName) }}
+# {{- if not (lookup "v1" "Secret" .Release.Namespace .Values.dbResourceName) }}
 
 apiVersion: v1
 kind: Secret
@@ -67,9 +65,9 @@ data:
 
 ---
 
-{{ end }}
+# {{ end }}
 
-{{- if not (lookup "v1" "Service" .Release.Namespace .Values.dbResourceName) }}
+# {{- if not (lookup "v1" "Service" .Release.Namespace .Values.dbResourceName) }}
 
 apiVersion: v1
 kind: Service
@@ -83,4 +81,4 @@ spec:
       protocol: TCP
   clusterIP: None
 
-{{ end }}
+# {{ end }}

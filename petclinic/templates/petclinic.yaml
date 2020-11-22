@@ -4,7 +4,7 @@ metadata:
   name: {{ .Values.appName }}
   labels:
     app: {{ .Values.appName }}
-    app.kubernetes.io/version: {{ .Values.tag }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
 spec:
   selector:
     matchLabels:
@@ -35,7 +35,7 @@ spec:
           resources:
               limits:
                 memory: '512Mi'
-                cpu: '250m'
+                cpu: '200m'
           readinessProbe:
               httpGet:
                 path: /
@@ -49,7 +49,7 @@ metadata:
   name: {{ .Values.appName }}
   labels:
     app: {{ .Values.appName }}
-    app.kubernetes.io/version: {{ .Values.tag }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
 spec:
   ports:
     - port: {{ .Values.appPort }}
@@ -65,7 +65,7 @@ metadata:
   name: {{ .Values.appName }}
   labels:
     app: {{ .Values.appName }}
-    app.kubernetes.io/version: {{ .Values.tag }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
 spec:
   to:
     kind: Service

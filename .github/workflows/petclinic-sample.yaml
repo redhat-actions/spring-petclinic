@@ -157,13 +157,14 @@ jobs:
       # This also means it is possible to uninstall an older release, taking down the db and marooning a newer petclinic.
       - name: Helm install
         run: |
-          export HELM_RELEASE="petclinic-$TAG"
+          export HELM_RELEASE="${{ env.APP_NAME }}-$TAG"
           echo "HELM_RELEASE=$HELM_RELEASE" >> $GITHUB_ENV
           set -x
           helm install $HELM_RELEASE ${{ env.CHART_DIR }} \
             --set-string appName="$HELM_RELEASE" \
             --set-string tag="${{ env.TAG }}" \
-            --set image="${{ env.IMAGE_URL }}"
+            --set image="${{ env.IMAGE_URL }}" \
+            --set dbResourceName="${{ env.APP_NAME }}-db-$TAG"
           helm get manifest $HELM_RELEASE > ${{ env.BUILT_MANIFEST }}
 
       # Upload the generated manifest. This is useful to have for cleanup, rewriting and debugging.

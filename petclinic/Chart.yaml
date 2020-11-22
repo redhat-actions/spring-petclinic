@@ -1,3 +1,4 @@
 apiVersion: v2
-name: petclinic
 version: 0.0.1
+name: petclinic
+appVersion: latest
