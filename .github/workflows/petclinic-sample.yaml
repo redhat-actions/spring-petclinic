@@ -99,7 +99,7 @@ jobs:
 
       # Use buildah to build the application image with the jar inside.
       - name: Build Image
-        uses: redhat-actions/buildah-action@v1
+        uses: redhat-actions/buildah-build@v1
         with:
           image: ${{ env.APP_NAME }}
           tag: ${{ env.IMAGE_TAG }}
