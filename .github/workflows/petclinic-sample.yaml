@@ -79,7 +79,7 @@ jobs:
     needs: compile
     outputs:
       image-tag: ${{ steps.set-image-tag.outputs.image-tag }}
-      image-url: ${{ steps.push-to-quay.outputs.image-url }}
+      registry-path: ${{ steps.push-to-quay.outputs.registry-path }}
     env:
       JAR_NAME: ${{ needs.compile.outputs.jarname }}
       IMAGE_TAG: latest
@@ -132,7 +132,7 @@ jobs:
     env:
       CHART_DIR: petclinic/
       BUILT_MANIFEST: petclinic-${{ needs.build-push-image.outputs.image-tag }}.yaml
-      IMAGE_URL: ${{ needs.build-push-image.outputs.image-url }}
+      IMAGE_PATH: ${{ needs.build-push-image.outputs.registry-path }}
       TAG: ${{ needs.build-push-image.outputs.image-tag }}
 
     steps:
@@ -163,7 +163,7 @@ jobs:
           helm install $HELM_RELEASE ${{ env.CHART_DIR }} \
             --set-string appName="$HELM_RELEASE" \
             --set-string tag="${{ env.TAG }}" \
-            --set image="${{ env.IMAGE_URL }}" \
+            --set image="${{ env.IMAGE_PATH }}" \
             --set dbResourceName="${{ env.APP_NAME }}-db-$TAG"
           helm get manifest $HELM_RELEASE > ${{ env.BUILT_MANIFEST }}
 
