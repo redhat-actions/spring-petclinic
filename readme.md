@@ -4,6 +4,8 @@
 
 This is a fork of the [Spring Pet Clinic](https://github.com/spring-projects/spring-petclinic) which uses Red Hat's GitHub Actions to build an application image and deploy it to OpenShift as an example CI/CD workflow.
 
+A Dockerfile and Helm Chart have been added to make this a cloud-ready version of the petclinic.
+
 [This workflow](./.github/workflows/petclinic-sample.yml) uses the following Red Hat Actions:
 
 - [buildah-action](https://github.com/redhat-actions/buildah-action)

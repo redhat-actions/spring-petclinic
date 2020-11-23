@@ -1,0 +1,110 @@
+name: Docker Build
+on: [ pull_request, push, workflow_dispatch ]
+env:
+  APP_NAME: petclinic
+  APP_PORT: 8080
+
+jobs:
+  #####################################################################################################################
+  ## The compile job compiles the application into a jar, and uploads it as an artifact for the next job to use.
+  compile:
+    name: Compile
+    runs-on: ubuntu-20.04
+    outputs:
+      jarname: ${{ steps.get-jarname.outputs.jarname }}
+    env:
+      TARGET_DIR: target/
+      MVN_REPO_DIR: ~/.m2/repository
+    steps:
+    - uses: actions/checkout@v2
+
+    # If none of these files has changed, we assume that the contents of .m2/repository can be fetched from the cache.
+    - name: Hash Maven files
+      run: |
+        echo "MVN_HASH=${{ hashFiles('pom.xml', '.mvn/**/*', 'mvnw*') }}" >> $GITHUB_ENV
+
+    # Download the m2 repository from the cache to speed up the build.
+    - name: Check for Maven cache
+      id: check-mvn-cache
+      uses: actions/cache@v2
+      with:
+        path: ${{ env.MVN_REPO_DIR }}
+        key: ${{ env.MVN_HASH }}
+
+    - name: Setup Java
+      uses: actions/setup-java@v1
+      with:
+        java-version: 11
+
+    - run: java -version
+
+    - run: mvn -ntp -B package
+
+    # If there was no cache hit above, store the output into the cache now.
+    - name: Save Maven repo into cache
+      if: ${{ steps.check-mvn-cache.outputs.cache-hit }} != 'true'
+      uses: actions/cache@v2
+      with:
+        path: ${{ env.MVN_REPO_DIR }}
+        key: ${{ env.MVN_HASH }}
+
+    # Store the output jar into the env for reuse below.
+    # It will contain, eg. "spring-petclinic-2.3.0.BUILD-SNAPSHOT.jar"
+    - name: Get jar filename
+      id: get-jarname
+      run: |
+        export JAR_NAME="$(basename $(ls target/*.jar))"
+        echo "Petclinic jar is $JAR_NAME"
+        echo "::set-output name=jarname::$JAR_NAME"
+        echo "JAR_NAME=$JAR_NAME" >> $GITHUB_ENV
+
+    # Upload the jar for future jobs to use.
+    - uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.JAR_NAME }}
+        path: ${{ env.TARGET_DIR }}/${{ env.JAR_NAME }}
+        if-no-files-found: error
+
+  #####################################################################################################################
+  ## The build and push image job builds the container image with the petclinic jar in it,
+  ## and pushes it to an image registry.
+  ## It outputs the image tag and image URL for the next step to use when deploying to the OpenShift cluster.
+  build-push-image:
+    name: Docker Build
+    runs-on: ubuntu-20.04
+    needs: compile
+    env:
+      JAR_NAME: ${{ needs.compile.outputs.jarname }}
+      IMAGE_TAG: latest
+    steps:
+      - uses: actions/checkout@v2
+
+      # Download the jar artifact from the compile step
+      - uses: actions/download-artifact@v2
+        with:
+          name: ${{ env.JAR_NAME }}
+
+      # Use the commit short-sha as the tag for this version of the image.
+      - name: Set Image tag
+        id: set-image-tag
+        run: |
+          export IMAGE_TAG="${GITHUB_SHA::7}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "::set-output name=image-tag::$IMAGE_TAG"
+
+      # The dockerfile expects the jar to be under target/
+      - name: Fake target/ dir
+        run: |
+          mkdir target/
+          mv -v ${{ env.JAR_NAME }} target/
+
+      # Use buildah to build the application image with the jar inside.
+      - name: Build Image
+        uses: redhat-actions/buildah-build@v1
+        with:
+          image: ${{ env.APP_NAME }}
+          tag: ${{ env.IMAGE_TAG }}
+          dockerfiles: |
+            ./Dockerfile
+          build-args:
+            jar_name=${{ env.JAR_NAME }}
