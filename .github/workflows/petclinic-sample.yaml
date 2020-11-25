@@ -6,7 +6,7 @@ env:
   TEST_NAMESPACE: tetchell-code
   APP_NAME: petclinic
   APP_PORT: 8080
-  TEAR_DOWN: false
+  TEAR_DOWN: true
 
 jobs:
   #####################################################################################################################
