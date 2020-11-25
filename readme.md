@@ -53,3 +53,14 @@ To run the workflow on your fork, you have to replace a few environment variable
 7. To clean up the resources, log in locally, run `helm ls`, and delete the release that the workflow created.
 
     To have the workflow clean up after itself, set `TEAR_DOWN: true` in the `env` section at the top of the workflow.
+
+
+### Docker Build
+
+Separate from the demo above, the project can also be built from its Dockerfile with:
+```
+mvn package && docker build . -t petclinic:latest
+docker run -p 8080:8080 petclinic:latest
+```
+
+After the server starts, the app will be available at `localhost:8080`.
