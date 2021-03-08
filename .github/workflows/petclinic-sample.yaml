@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-20.04
     outputs:
       jarname: ${{ steps.get-jarname.outputs.jarname }}
+      commit_sha: ${{ steps.commit-data.outputs.short_sha }}
     env:
       TARGET_DIR: target/
       MVN_REPO_DIR: ~/.m2/repository
@@ -70,6 +71,11 @@ jobs:
         path: ${{ env.TARGET_DIR }}/${{ env.JAR_NAME }}
         if-no-files-found: error
 
+    # Use the commit short-sha as the suffix of the app_name
+    - name: Get commit short-sha
+      id: commit-data
+      uses: redhat-actions/common/commit-data@v1
+
   #####################################################################################################################
   ## The build and push image job builds the container image with the petclinic jar in it,
   ## and pushes it to an image registry.
@@ -79,31 +85,23 @@ jobs:
     runs-on: ubuntu-20.04
     needs: compile
     outputs:
-      image-tag: ${{ steps.set-image-tag.outputs.image-tag }}
       registry-path: ${{ steps.push-to-quay.outputs.registry-path }}
     env:
       JAR_NAME: ${{ needs.compile.outputs.jarname }}
-      IMAGE_TAG: latest
+      IMAGE_TAGS: latest ${{ needs.compile.outputs.commit_sha }}
     steps:
       # Download the jar artifact from the compile step
       - uses: actions/download-artifact@v2
         with:
           name: ${{ env.JAR_NAME }}
 
-      # Use the commit short-sha as the tag for this version of the image.
-      - name: Set Image tag
-        id: set-image-tag
-        run: |
-          export IMAGE_TAG="${GITHUB_SHA::7}"
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-          echo "::set-output name=image-tag::$IMAGE_TAG"
-
       # Use buildah to build the application image with the jar inside.
       - name: Build Image
-        uses: redhat-actions/buildah-build@v1
+        id: build-image
+        uses: redhat-actions/buildah-build@v2
         with:
           image: ${{ env.APP_NAME }}
-          tag: ${{ env.IMAGE_TAG }}
+          tags: ${{ env.IMAGE_TAGS }}
           oci: true
           base-image: docker.io/fabric8/java-alpine-openjdk11-jre
           content: ${{ env.JAR_NAME }}
@@ -116,10 +114,10 @@ jobs:
       # Push the built image to our image registry so it can be pulled into the OpenShift cluster.
       - name: Push to Quay
         id: push-to-quay
-        uses: redhat-actions/push-to-registry@v1
+        uses: redhat-actions/push-to-registry@v2
         with:
-          image: ${{ env.APP_NAME }}
-          tag: ${{ env.IMAGE_TAG }}
+          image: ${{ steps.build-image.outputs.image }}
+          tags: ${{ steps.build-image.outputs.tags }}
           registry: ${{ env.IMAGE_REGISTRY }}/${{ env.REGISTRY_USER }}
           username: ${{ env.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
@@ -130,12 +128,10 @@ jobs:
   openshift-deploy:
     name: Deploy on OpenShift
     runs-on: ubuntu-20.04
-    needs: build-push-image
+    needs: [ build-push-image, compile ]
     env:
-      CHART_DIR: petclinic/
-      BUILT_MANIFEST: petclinic-${{ needs.build-push-image.outputs.image-tag }}.yaml
       IMAGE_PATH: ${{ needs.build-push-image.outputs.registry-path }}
-      TAG: ${{ needs.build-push-image.outputs.image-tag }}
+      COMMIT_SHA: ${{ needs.compile.outputs.commit_sha }}
 
     steps:
       - uses: actions/checkout@v2
@@ -146,48 +142,23 @@ jobs:
       - name: OpenShift login
         uses: redhat-actions/oc-login@v1
         with:
-          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
-          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          openshift_server_url: ${{ secrets.OPENSHIFT_SANDBOX_URL }}
+          openshift_token: ${{ secrets.TIM_OPENSHIFT_TOKEN }}
           # openshift_username:
           # openshift_password:
           insecure_skip_tls_verify: true
           namespace: ${{ env.TEST_NAMESPACE }}
 
-      # Deploy our sample application with helm.
-      # Only one database per namespace should be deployed at a time (see mysql.yaml)
-      # but the petclinic is redeployed for each commit.
-      # This also means it is possible to uninstall an older release, taking down the db and marooning a newer petclinic.
-      - name: Helm install
-        run: |
-          export HELM_RELEASE="${{ env.APP_NAME }}-$TAG"
-          echo "HELM_RELEASE=$HELM_RELEASE" >> $GITHUB_ENV
-          set -x
-          helm install $HELM_RELEASE ${{ env.CHART_DIR }} \
-            --set-string appName="$HELM_RELEASE" \
-            --set-string tag="${{ env.TAG }}" \
-            --set image="${{ env.IMAGE_PATH }}" \
-            --set dbResourceName="${{ env.APP_NAME }}-db-$TAG"
-          helm get manifest $HELM_RELEASE > ${{ env.BUILT_MANIFEST }}
-
-      # Upload the generated manifest. This is useful to have for cleanup, rewriting and debugging.
-      - name: Upload manifest
-        uses: actions/upload-artifact@v2
+      # Deploy our sample application with oc.
+      # This will take down all old deployments before creating a new deployment
+      - name: Deploy and expose app
+        id: oc-new-app
+        uses: redhat-actions/oc-new-app@v1
         with:
-          name: ${{ env.BUILT_MANIFEST }}
-          path: ${{ env.BUILT_MANIFEST }}
-          if-no-files-found: error
-
-      - name: View deployed resources
-        run: oc get -f ${{ env.BUILT_MANIFEST }}
-
-      # Determine the domain to which our app has been deployed; this allows us to issue requests to the app.
-      - name: Get public route
-        run: |
-          export HOST=$(oc get route $HELM_RELEASE -o jsonpath='{.spec.host}')
-          [[ -n $HOST ]]   # Check non-empty
-          export PROJECT_ROUTE=http://$HOST
-          echo "Project route is $PROJECT_ROUTE"
-          echo "PROJECT_ROUTE=$PROJECT_ROUTE" >> $GITHUB_ENV
+          app_name: ${{ env.APP_NAME }}-${{ env.COMMIT_SHA }}
+          port: ${{ env.APP_PORT }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          image: ${{ env.IMAGE_PATH }}
 
       # Perform a (very) basic integration test.
       # This step is retried since the time to pull the image and start the pod can vary.
@@ -200,16 +171,10 @@ jobs:
           max_attempts: 30
           warning_on_retry: false
           # Just check that the root endpoint returns a success status (-f flag).
-          command: curl -sSfLi ${{ env.PROJECT_ROUTE }}
-
-      # If the test above failed, describe all our resources so we can see what may be wrong.
-      - name: Debug failed test
-        if: always() && steps.test-project.outcome == 'failure'
-        run: |
-          oc describe -f ${{ env.BUILT_MANIFEST }}
-          oc describe po
+          command: curl -sSfLi ${{ steps.oc-new-app.outputs.route }}
 
       # Clean up the resources we deployed, even if there was an error above.
-      - name: Clean up deployed resources
-        if: always() && env.TEAR_DOWN == 'true' && steps.apply-manifest.outcome != 'skipped'
-        run: helm delete $HELM_RELEASE
+      - name: Delete deployment that was created
+        if: always() && env.TEAR_DOWN == 'true'
+        run:
+          oc delete all --selector=${{ steps.oc-new-app.outputs.selector }}
